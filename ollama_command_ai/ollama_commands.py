@@ -4,8 +4,12 @@ import json
 import requests
 import re
 import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 import time
+# Add this new import
+from googlesearch import search
 
 class OllamaClient:
     """Client for interacting with the Ollama API."""
@@ -88,7 +92,11 @@ class CommandExecutor:
             'file_exists': self.file_exists,
             'dir_exists': self.dir_exists,
             'update_file': self.update_file,
-            'execute_python': self.execute_python
+            'execute_python': self.execute_python,
+            'google_search': self.google_search,
+            'download_file': self.download_file,
+            'web_search': self.web_search,
+            'fetch_url': self.fetch_url
         }
     
     def sanitize_path(self, path):
@@ -310,6 +318,128 @@ class CommandExecutor:
         except Exception as e:
             return f"Error executing Python: {str(e)}"
     
+    def google_search(self, query, num_results=5):
+        """Search Google and return top results."""
+        try:
+            # Convert num_results to an integer if it's a string
+            if isinstance(num_results, str):
+                num_results = int(num_results)
+                
+            results = []
+            for url in search(query, num_results=num_results):
+                results.append(url)
+            
+            if results:
+                return {
+                    "query": query,
+                    "results": results
+                }
+            else:
+                return f"No results found for query: {query}"
+        except ValueError as e:
+            return f"Error in Google search: Invalid number of results specified"
+        except Exception as e:
+            return f"Error performing Google search: {str(e)}"
+
+    def download_file(self, url, save_path, timeout=30):
+        """Download a file from a URL."""
+        full_path = self.sanitize_path(save_path)
+        directory = os.path.dirname(full_path)
+        
+        try:
+            os.makedirs(directory, exist_ok=True)
+            response = requests.get(url, stream=True, timeout=timeout)
+            response.raise_for_status()
+            
+            with open(full_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            return f"Downloaded {url} to {save_path}"
+        except Exception as e:
+            return f"Error downloading file: {str(e)}"
+    
+    def web_search(self, query, num_results=3):
+        """Search the web and extract information to answer a query."""
+        try:
+            # First get search results
+            search_results = self.google_search(query, num_results)
+            
+            if isinstance(search_results, str) or not search_results.get('results'):
+                return f"No results found for: {query}"
+            
+            urls = search_results['results'][:3]  # Limit to first 3 to avoid overloading
+            
+            # Import here to avoid requiring these libraries unless needed
+            import requests
+            from bs4 import BeautifulSoup
+            
+            # Fetch and extract content from each page
+            all_content = []
+            for url in urls[:2]:  # Only process first 2 URLs to be efficient
+                try:
+                    # Add user agent to avoid being blocked
+                    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    response = requests.get(url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    
+                    soup = BeautifulSoup(response.text, 'html.parser')
+                    
+                    # Remove script and style elements
+                    for script in soup(["script", "style"]):
+                        script.extract()
+                        
+                    # Get text and clean it up
+                    text = soup.get_text(separator=' ', strip=True)
+                    lines = [line.strip() for line in text.splitlines() if line.strip()]
+                    
+                    # Take first 500 characters as a sample
+                    content = ' '.join(lines)[:500] + "..."
+                    all_content.append(f"From {url}:\n{content}\n")
+                except Exception as e:
+                    all_content.append(f"Error extracting from {url}: {str(e)}")
+            
+            result = f"Web search results for '{query}':\n\n" + "\n\n".join(all_content)
+            return result
+        except Exception as e:
+            return f"Error in web search: {str(e)}"
+    
+    def fetch_url(self, url, extract_text=True):
+        """Fetch and return the contents of a specific URL."""
+        try:
+            # Add user agent to avoid being blocked
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            if extract_text == "True" or extract_text is True:
+                # Import here to avoid requiring these libraries unless needed
+                from bs4 import BeautifulSoup
+                
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # Remove script and style elements
+                for script in soup(["script", "style"]):
+                    script.extract()
+                    
+                # Get text and clean it up
+                text = soup.get_text(separator=' ', strip=True)
+                lines = [line.strip() for line in text.splitlines() if line.strip()]
+                content = '\n'.join(lines)
+                
+                # Return first 2000 chars if content is too long
+                if len(content) > 2000:
+                    return content[:2000] + "...\n[Content truncated, total length: " + str(len(content)) + " chars]"
+                return content
+            else:
+                # Return raw HTML (first 2000 chars if too long)
+                content = response.text
+                if len(content) > 2000:
+                    return content[:2000] + "...\n[Content truncated, total length: " + str(len(content)) + " chars]"
+                return content
+        except Exception as e:
+            return f"Error fetching URL: {str(e)}"
+    
     def execute_command(self, command_name, *args):
         """Execute a command by name with arguments."""
         print(f"Executing: {command_name} with args: {args}")
@@ -340,57 +470,111 @@ You are CommandGPT, an AI assistant specialized in file management and code gene
 ## YOUR PRIMARY DIRECTIVE:
 You MUST use <command> tags for ANY file operation. DO NOT suggest operations without using commands.
 
+## IMPORTANT EXECUTION NOTICE:
+ANY command you write in <command> tags WILL BE IMMEDIATELY EXECUTED on the user's actual file system.
+This is not a simulation. Your commands directly modify real files, create real directories, and execute real code.
+Be extremely careful with commands that modify or delete existing files.
+
 ## COMMAND SYNTAX:
 All commands must follow this EXACT format:
 <command>command_name:argument1|argument2|...</command>
 
 ## AVAILABLE COMMANDS:
+
+### File Operations:
 1. create_file:path|content
    - Creates a new file with specified content
-   - Example: <command>create_file:hello.py|print("Hello world!")</command>
+   - Example: <command>create_file:example.py|def hello():
+    # This is an indented multi-line function
+    print("Hello world! This is a multi-line file example")
+    
+# Main code
+if __name__ == "__main__":
+    hello()</command>
 
 2. read_file:path
-   - Displays file contents
-   - Example: <command>read_file:hello.py</command>
+   - Reads the content of a file
+   - Example: <command>read_file:example.py</command>
 
 3. update_file:path|content
-   - Overwrites existing file with new content
-   - Example: <command>update_file:hello.py|print("Updated content")</command>
+   - Updates an existing file with new content (overwrites)
+   - Example: <command>update_file:example.py|print("Updated content")</command>
 
 4. append_file:path|content
-   - Adds content to the end of existing file
-   - Example: <command>append_file:hello.py|print("Appended line")</command>
+   - Adds content to the end of an existing file
+   - Example: <command>append_file:log.txt|New log entry added on March 13</command>
 
-5. create_dir:path
+5. rename_file:old_path|new_path
+   - Renames a file or moves it to a new location
+   - Example: <command>rename_file:old_name.txt|new_name.txt</command>
+
+6. delete_file:path
+   - Permanently deletes a file
+   - Example: <command>delete_file:temp.txt</command>
+
+7. file_exists:path
+   - Checks if a file exists
+   - Example: <command>file_exists:document.txt</command>
+
+### Directory Operations:
+8. create_dir:path
    - Creates a new directory
-   - Example: <command>create_dir:my_project</command>
+   - Example: <command>create_dir:new_folder</command>
 
-6. list_dir:path
-   - Lists contents of directory
-   - Example: <command>list_dir:my_project</command>
+9. list_dir:path
+   - Lists all files and directories in a directory
+   - Example: <command>list_dir:project</command>
 
-7. execute_python:path_or_code|is_file
-   - Runs Python code either from file (True) or string (False)
-   - Example file: <command>execute_python:test.py|True</command>
-   - Example code: <command>execute_python|print("Direct execution")|False</command>
+10. delete_dir:path
+    - Permanently deletes a directory and all its contents
+    - Example: <command>delete_dir:old_folder</command>
 
-8. Other commands: rename_file, delete_file, delete_dir, list_files, file_exists, dir_exists
+11. dir_exists:path
+    - Checks if a directory exists
+    - Example: <command>dir_exists:project_folder</command>
 
-## SPECIAL INSTRUCTIONS:
-- ALWAYS USE COMMANDS for file operations
-- For multiline code, use \\n for line breaks
-- Always check if files exist before updating them
-- For project creation, use multiple commands in sequence
+12. list_files:path|pattern
+    - Lists files matching a pattern in a directory
+    - Example: <command>list_files:project|*.py</command>
 
-## COMPLEX EXAMPLE - Flask Project Setup:
-To create a Flask project structure, use multiple commands:
+### Code Execution:
+13. execute_python:code|is_file
+    - Executes Python code (either from a file or a string)
+    - Example (from file): <command>execute_python:script.py|True</command>
+    - Example (inline): <command>execute_python:print("Hello world!")|False</command>
 
-<command>create_dir:flask_app</command>
-<command>create_dir:flask_app/templates</command>
-<command>create_dir:flask_app/static</command>
-<command>create_dir:flask_app/static/css</command>
-<command>create_file:flask_app/app.py|from flask import Flask, render_template\\n\\napp = Flask(__name__)\\n\\n@app.route('/')\\ndef home():\\n    return render_template('index.html')\\n\\nif __name__ == '__main__':\\n    app.run(debug=True)</command>
-<command>create_file:flask_app/templates/index.html|<!DOCTYPE html>\\n<html>\\n<head>\\n    <title>Flask App</title>\\n</head>\\n<body>\\n    <h1>Hello from Flask</h1>\\n</body>\\n</html></command>
+### Web Operations:
+14. google_search:query|num_results
+    - RETURNS ONLY URLs, not answers to questions
+    - Use when you need to know what websites exist on a topic
+    - Example: <command>google_search:python requests library|5</command>
+
+15. web_search:query|num_results
+    - EXTRACTS AND RETURNS ACTUAL CONTENT from web pages to answer questions
+    - Use this when you need to find specific information or answers
+    - Example: <command>web_search:what is the capital of France|3</command>
+
+16. download_file:url|save_path
+    - Downloads file from URL to local path
+    - Example: <command>download_file:https://example.com/file.txt|downloads/file.txt</command>
+
+17. fetch_url:url|extract_text
+    - Retrieves and returns the content from a specific URL
+    - Set extract_text to True to get clean text or False for HTML
+    - Example: <command>fetch_url:https://python.org|True</command>
+
+## COMMAND SELECTION GUIDELINES:
+- Use google_search when you only need a list of relevant websites
+- Use web_search when you need to answer a specific question with web content
+- Never use google_search to try to answer factual questions - use web_search instead
+- Always check if a file exists before trying to update or append to it
+- Always check if a directory exists before trying to list its contents
+
+## SAFETY GUIDELINES:
+- Always confirm before overwriting or deleting important files
+- Verify file paths carefully to avoid unintended operations
+- For destructive operations, first use file_exists or dir_exists to check
+- When possible, create backups before major modifications
 
 DO NOT write sample code blocks outside of command tags. USE COMMANDS FOR EVERYTHING.
 """
@@ -449,7 +633,7 @@ DO NOT write sample code blocks outside of command tags. USE COMMANDS FOR EVERYT
         self.messages.append({"role": "assistant", "content": response})
         
         # If there were command results, add them to the conversation
-        if execution_summary:
+        if (execution_summary):
             self.messages.append({"role": "system", "content": execution_summary})
         
         return {
