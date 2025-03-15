@@ -1,0 +1,2 @@
+This project was written entirely using AI, the goal was to create a functioning software renderer 
+while also learning low large of a codebase could an AI work in and create.  I am still adding functionality to this so we havent hit the limits yet.
