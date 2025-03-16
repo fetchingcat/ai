@@ -6,3 +6,5 @@ memorizeit.py will by default build a decoder-only model and use it to run 100 e
 generate.py will load a model and allow you to provide a starter prompt for the model to predict from
 visualize.py is some code to help us visualize everything
 
+we don't use BPE or subwords at all but rather character level tokenization so our max vocabulary size is 256 (the total number of options for a byte)
+
