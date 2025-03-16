@@ -125,7 +125,7 @@ def setup_models_with_personas(model1, model2):
     
     return persona_instructions
 
-def ai_conversation(client, model1, model2, initial_prompt, num_turns=10, options1=None, options2=None, persona_instructions=None):
+def ai_conversation(client, model1, model2, initial_prompt, num_turns=10, options1=None, options2=None, persona_instructions=None, reminder_message=None):
     """Have two AI models talk to each other for a specified number of turns."""
     if options1 is None:
         options1 = {}
@@ -133,36 +133,58 @@ def ai_conversation(client, model1, model2, initial_prompt, num_turns=10, option
         options2 = {}
     if persona_instructions is None:
         persona_instructions = {model1: "", model2: ""}
+    if reminder_message is None:
+        reminder_message = f"Remember, you're discussing: {initial_prompt} Please continue the conversation."
     
     print(f"\n{'='*50}")
     print(f"Starting conversation between {model1} and {model2}")
+    print(f"Total requested turns: {num_turns}")
     print(f"{'='*50}\n")
     
     messages = []
+    turn_counter = 0
     
     # Initial prompt to get things started
     print(f"Initial prompt: {initial_prompt}\n")
     
     # First response from model 1
-    print(f"{model1} is thinking...", end="\r")
+    print(f"[Turn 0 - Initial] {model1} is thinking...", end="\r")
     first_prompt = persona_instructions[model1] + initial_prompt
-    print(f"{model1}: ", end="")
+    print(f"[Turn 0 - Initial] {model1}: ", end="")
     response1 = client.generate(first_prompt, model1, options1)
     
     messages.append({"model": model1, "content": response1, "prompt": initial_prompt})
     
-    current_prompt = response1
+    # Keep track of conversation history as a structured format that won't confuse the model
+    conversation_history = f"Initial topic: {initial_prompt}\n\n"
+    conversation_history += f"Speaker 1: {response1}\n"  # Use generic "Speaker" labels instead of model names
+    
+    # Reminder frequency (every N turns)
+    reminder_frequency = 3
     
     # Alternate between models for the specified number of turns
     for i in range(num_turns):
+        turn_counter += 1
         # Model 2's turn
-        print(f"{model2} is thinking...", end="\r")
-        second_prompt = persona_instructions[model2] + current_prompt
-        print(f"{model2}: ", end="")
+        print(f"[Turn {turn_counter}.1] {model2} is thinking...", end="\r")
+        
+        # Add reminder if needed (every few turns)
+        if i > 0 and i % reminder_frequency == 0:
+            # Display the reminder to the user
+            print(f"\n[System Reminder to {model2}: {reminder_message}]\n")
+            second_prompt = persona_instructions[model2] + reminder_message + "\n\nConversation so far:\n" + conversation_history
+        else:
+            # Send conversation history instead of just the last message
+            second_prompt = persona_instructions[model2] + "Continue this conversation. You are Speaker 2:\n" + conversation_history
+            
+        print(f"[Turn {turn_counter}.1] {model2}: ", end="")
         response2 = client.generate(second_prompt, model2, options2)
         
+        # Update conversation history without including model names
+        conversation_history += f"\nSpeaker 2: {response2}\n"
+        
         # Save the conversation
-        messages.append({"model": model2, "content": response2, "prompt": current_prompt})
+        messages.append({"model": model2, "content": response2, "prompt": second_prompt})
         
         # Exit if the response indicates an end to the conversation
         if any(phrase in response2.lower() for phrase in ["goodbye", "bye", "end of conversation"]):
@@ -174,16 +196,25 @@ def ai_conversation(client, model1, model2, initial_prompt, num_turns=10, option
         
         # Model 1's turn
         if i < num_turns - 1:  # Skip the last turn for model1 if we've reached the limit
-            print(f"{model1} is thinking...", end="\r")
-            model1_prompt = persona_instructions[model1] + response2
-            print(f"{model1}: ", end="")
+            print(f"[Turn {turn_counter}.2] {model1} is thinking...", end="\r")
+            
+            # Add reminder if needed (offset from model 2's reminders)
+            if i > 0 and (i + reminder_frequency//2) % reminder_frequency == 0:
+                # Display the reminder to the user
+                print(f"\n[System Reminder to {model1}: {reminder_message}]\n")
+                model1_prompt = persona_instructions[model1] + reminder_message + "\n\nConversation so far:\n" + conversation_history
+            else:
+                # Send conversation history instead of just the last message
+                model1_prompt = persona_instructions[model1] + "Continue this conversation. You are Speaker 1:\n" + conversation_history
+                
+            print(f"[Turn {turn_counter}.2] {model1}: ", end="")
             response1 = client.generate(model1_prompt, model1, options1)
             
-            # Save the conversation
-            messages.append({"model": model1, "content": response1, "prompt": response2})
+            # Update conversation history
+            conversation_history += f"\nSpeaker 1: {response1}\n"
             
-            # Update the current prompt
-            current_prompt = response1
+            # Save the conversation
+            messages.append({"model": model1, "content": response1, "prompt": model1_prompt})
             
             # Exit if the response indicates an end to the conversation
             if any(phrase in response1.lower() for phrase in ["goodbye", "bye", "end of conversation"]):
@@ -194,7 +225,7 @@ def ai_conversation(client, model1, model2, initial_prompt, num_turns=10, option
             time.sleep(0.5)
     
     print(f"\n{'='*50}")
-    print("Conversation finished")
+    print(f"Conversation finished after {turn_counter} turns")
     print(f"{'='*50}")
     
     return messages
@@ -373,7 +404,7 @@ def main():
         "You are philosophers discussing the nature of consciousness and whether machines can be conscious.",
         "You are scientists debating whether we live in a simulation.",
         "You are science fiction writers collaborating on a story about the future of humanity.",
-        "You are travel agents planning an ideal vacation for a family of four with diverse interests.",
+        "You are saying the alphabet one letter at a time, alternating between you.",
         "You're historians debating the most pivotal moment in human history.",
         "You're economists discussing solutions to wealth inequality.",
         "You're chefs arguing about the most important cooking technique.",
@@ -400,6 +431,15 @@ def main():
         initial_prompt = random.choice(conversation_starters)
         print(f"Invalid input, using a random starter: {initial_prompt}")
     
+    # Option for custom reminder
+    custom_reminder = input("\nWould you like to customize the reminder message? (y/n): ").lower() == 'y'
+    if custom_reminder:
+        reminder_message = input("\nEnter custom reminder message (will be shown periodically to keep models on topic):\n")
+        if not reminder_message:
+            reminder_message = f"Remember, you're discussing: {initial_prompt} Please continue the conversation."
+    else:
+        reminder_message = f"Remember, you're discussing: {initial_prompt} Please continue the conversation."
+    
     # Get number of conversation turns
     try:
         num_turns = int(input("\nHow many conversation turns? (default 5): ") or "5")
@@ -408,8 +448,9 @@ def main():
     except ValueError:
         num_turns = 5
     
-    # Run the AI-to-AI conversation
-    conversation = ai_conversation(client, model1, model2, initial_prompt, num_turns, options1, options2, persona_instructions)
+    # Run the AI-to-AI conversation with the custom reminder
+    conversation = ai_conversation(client, model1, model2, initial_prompt, num_turns, 
+                                  options1, options2, persona_instructions, reminder_message)
     
     # Save conversation if desired
     save_option = input("\nWould you like to save this conversation to a file? (y/n): ").lower() == 'y'
