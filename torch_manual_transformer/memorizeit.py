@@ -611,6 +611,8 @@ def parse_args():
                         help="Embedding dimension")
     parser.add_argument("--n-layers", type=int, default=8,
                         help="Number of transformer layers")
+    parser.add_argument("--n-heads", type=int, default=8,
+                        help="Number of attention heads")
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Training batch size")
     parser.add_argument("--seq-length", type=int, default=128,
@@ -628,6 +630,7 @@ def main():
     config.model_type = args.model_type
     config.d_model = args.d_model
     config.n_layers = args.n_layers
+    config.n_heads = args.n_heads
     config.batch_size = args.batch_size
     config.seq_length = args.seq_length
     
