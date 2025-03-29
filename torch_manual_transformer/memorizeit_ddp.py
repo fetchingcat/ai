@@ -9,6 +9,10 @@ import time
 from torch.amp import autocast, GradScaler
 import copy  # Add this line
 import argparse  # Add this line
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 # Move these print statements inside a function or the main function
 def print_system_info():
@@ -460,6 +464,9 @@ def train(model, dataloader, optimizer, scheduler, criterion, config):
     start_time = time.time()
     scaler = GradScaler("cuda" if torch.cuda.is_available() else "cpu")
     
+    # Get the base model from DDP if needed
+    base_model = model.module if hasattr(model, 'module') else model
+    
     for batch_idx, (src, tgt) in enumerate(dataloader):
         src = src.to(device)
         tgt = tgt.to(device)
@@ -473,7 +480,7 @@ def train(model, dataloader, optimizer, scheduler, criterion, config):
             
             # Create masks
             src_mask = None  # Could be padding mask if needed
-            tgt_mask = model._generate_square_subsequent_mask(tgt_input.size(1)).to(device)
+            tgt_mask = base_model._generate_square_subsequent_mask(tgt_input.size(1)).to(device)
             
             # Forward pass with mixed precision
             optimizer.zero_grad()
@@ -484,7 +491,7 @@ def train(model, dataloader, optimizer, scheduler, criterion, config):
         else:  # encoder_only or decoder_only
             # Create mask appropriate for the model type
             if config.model_type == "decoder_only":
-                mask = model._generate_square_subsequent_mask(src.size(1)).to(device)
+                mask = base_model._generate_square_subsequent_mask(src.size(1)).to(device)
             else:  # encoder_only
                 mask = None  # No causal mask needed for encoder-only
             
@@ -517,6 +524,9 @@ def evaluate(model, dataloader, criterion, config):
     model.eval()
     total_loss = 0
     
+    # Get the base model from DDP if needed
+    base_model = model.module if hasattr(model, 'module') else model
+    
     with torch.no_grad():
         for src, tgt in dataloader:
             src, tgt = src.to(device), tgt.to(device)
@@ -530,7 +540,7 @@ def evaluate(model, dataloader, criterion, config):
                 
                 # Create masks
                 src_mask = None  # Could be padding mask if needed
-                tgt_mask = model._generate_square_subsequent_mask(tgt_input.size(1)).to(device)
+                tgt_mask = base_model._generate_square_subsequent_mask(tgt_input.size(1)).to(device)
                 
                 # Forward pass
                 output = model(src, tgt_input, src_mask, tgt_mask)
@@ -539,7 +549,7 @@ def evaluate(model, dataloader, criterion, config):
             else:  # encoder_only or decoder_only
                 # Create mask appropriate for the model type
                 if config.model_type == "decoder_only":
-                    mask = model._generate_square_subsequent_mask(src.size(1)).to(device)
+                    mask = base_model._generate_square_subsequent_mask(src.size(1)).to(device)
                 else:  # encoder_only
                     mask = None  # No causal mask needed for encoder-only
                 
@@ -601,7 +611,20 @@ def generate_text(model, dataset, start_text, max_len=500, temperature=0.6):
     return ''.join(chars)
 
 
-# Now define the main function AFTER these helper functions:
+def setup(rank, world_size, backend="nccl"):
+    """
+    Setup distributed training environment for the given rank
+    """
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    
+    # Initialize the process group with the specified backend
+    dist.init_process_group(backend, rank=rank, world_size=world_size)
+    
+    # Set device for this process
+    torch.cuda.set_device(rank)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train a configurable transformer model")
     parser.add_argument("--model-type", type=str, default="decoder_only", 
@@ -614,20 +637,31 @@ def parse_args():
     parser.add_argument("--n-heads", type=int, default=8,
                         help="Number of attention heads")
     parser.add_argument("--batch-size", type=int, default=32,
-                        help="Training batch size")
+                        help="Total training batch size across all GPUs")
     parser.add_argument("--seq-length", type=int, default=128,
                         help="Maximum sequence length")
-    parser.add_argument("--learning-rate", type=float, default=3e-4,
-                        help="Base learning rate (will be scaled with batch size)")
-    parser.add_argument("--no-lr-scaling", action="store_true",
-                        help="Disable automatic learning rate scaling with batch size")
+    parser.add_argument("--backend", type=str, default="nccl",
+                        choices=["nccl", "gloo"],
+                        help="Distributed backend (nccl or gloo)")
     # Add more arguments as needed
     
     return parser.parse_args()
 
-def main():
-    # Parse command line arguments
-    args = parse_args()
+def main_worker(gpu, ngpus_per_node, args):
+    """
+    Main worker function for distributed training
+    """
+    # Setup distributed environment with the specified backend
+    rank = gpu
+    setup(rank, ngpus_per_node, args.backend)
+    
+    # Print only from main process to avoid clutter
+    is_main_process = (rank == 0)
+    
+    if is_main_process:
+        print_system_info()
+        print(f"Using device: cuda:{rank}")
+        print(f"Using {args.backend} backend for distributed training")
     
     # Update config from arguments
     config = Config()
@@ -635,71 +669,94 @@ def main():
     config.d_model = args.d_model
     config.n_layers = args.n_layers
     config.n_heads = args.n_heads
-    config.batch_size = args.batch_size
+    
+    # Scale learning rate based on batch size
+    base_batch_size = 32  # Original design batch size
+    total_batch_size = args.batch_size  # Total batch size across all GPUs
+    lr_scale_factor = total_batch_size / base_batch_size
+    config.learning_rate *= lr_scale_factor
+    
+    if is_main_process:
+        print(f"Total batch size: {total_batch_size}")
+        print(f"Learning rate scaled by {lr_scale_factor:.2f}x to {config.learning_rate:.6f}")
+    
+    # Set per-GPU batch size
+    config.batch_size = args.batch_size // ngpus_per_node
     config.seq_length = args.seq_length
     
-    # Set base learning rate from command line or use default
-    base_lr = args.learning_rate
-    
-    # Scale learning rate with batch size (unless disabled)
-    # Standard batch size is 32, so we scale proportionally
-    if not args.no_lr_scaling:
-        config.learning_rate = base_lr * (config.batch_size / 32)
-        print(f"Scaling learning rate: {base_lr} → {config.learning_rate:.6f} (batch size: {config.batch_size})")
-    else:
-        config.learning_rate = base_lr
-        print(f"Using fixed learning rate: {config.learning_rate}")
-    
-    # Print system info once at the beginning
-    print_system_info()
-    print(f"Using device: {device}")
-    
-    # Load text data
+    # Load text data (all processes need this for dataset)
     data_file = "./data.txt"
     if not os.path.exists(data_file):
-        print(f"File not found: {data_file}")
+        if is_main_process:
+            print(f"File not found: {data_file}")
         return
     
     # Read text data
     with open(data_file, 'r', encoding='utf-8') as f:
         text = f.read()
     
-    # Create dataset and dataloader based on model type
+    # Create dataset
     dataset = TransformerDataset(text, config.seq_length, config.model_type)
     config.vocab_size = dataset.vocab_size
     
-    # Initialize the configurable model
-    model = ConfigurableTransformer(config).to(device)
-    print(f"Model type: {config.model_type}")
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+    # Use DistributedSampler
+    train_sampler = DistributedSampler(
+        dataset,
+        num_replicas=ngpus_per_node,
+        rank=rank
+    )
     
     dataloader = DataLoader(
         dataset, 
         batch_size=config.batch_size,
-        shuffle=True,
+        shuffle=False,  # Sampler handles shuffling
         pin_memory=True,
-        num_workers=4
+        num_workers=4,
+        sampler=train_sampler
     )
     
-    # Initialize optimizer
+    # Create model and move to correct device
+    model = ConfigurableTransformer(config).to(rank)
+    
+    # Wrap model with DDP
+    model = DDP(model, device_ids=[rank])
+    
+    if is_main_process:
+        print(f"Model type: {config.model_type}")
+        print(f"Model parameters: {sum(p.numel() for p in model.parameters())}")
+    
+    # Initialize optimizer (after DDP wrapping)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.learning_rate)
     
     # Check if saved model exists and load if it does
     checkpoint_path = 'best_model.pt'
     start_epoch = 0
+    best_loss = float('inf')
+    
     if os.path.exists(checkpoint_path):
-        print(f"Loading checkpoint from {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # Load checkpoint only on the main process and broadcast to others
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        
+        # For DDP models, need to handle state dict specially
+        if 'module' not in list(checkpoint['model_state_dict'].keys())[0]:
+            # Add 'module.' prefix for compatibility with DDP
+            new_state_dict = {f'module.{k}': v for k, v in checkpoint['model_state_dict'].items()}
+            model.load_state_dict(new_state_dict)
+        else:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1
         best_loss = checkpoint['loss']
-        print(f"Resuming from epoch {start_epoch} with previous best loss: {best_loss:.4f}")
+        
+        if is_main_process:
+            print(f"Resuming from epoch {start_epoch} with previous best loss: {best_loss:.4f}")
     else:
-        best_loss = float('inf')
-        print("No checkpoint found, starting training from scratch")
+        if is_main_process:
+            print("No checkpoint found, starting training from scratch")
     
-    # Initialize scheduler (must be after optimizer initialization and potential loading)
+    # Initialize scheduler
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=config.learning_rate,
@@ -713,166 +770,120 @@ def main():
     # Store losses for plotting
     train_losses = []
     val_losses = []
-    
-    # Initialize val_loss with a default value before the loop
-    val_loss = best_loss  # Use the loaded best_loss as default
+    val_loss = best_loss
     
     # Training loop
     for epoch in range(start_epoch, config.epochs):
-        print(f"\nEpoch {epoch+1}/{config.epochs}")
+        # Set epoch for sampler (important for proper shuffling)
+        train_sampler.set_epoch(epoch)
         
-        # Train
+        if is_main_process:
+            print(f"\nEpoch {epoch+1}/{config.epochs}")
+        
+        # Modify train function to support DDP
         train_loss = train(model, dataloader, optimizer, scheduler, criterion, config)
-        print(f"Train loss: {train_loss:.4f}")
-        train_losses.append(train_loss)
         
-        # Evaluate
-        val_loss = evaluate(model, dataloader, criterion, config)
-        print(f"Validation loss: {val_loss:.4f}")
-        val_losses.append(val_loss)
+        # Average losses across processes
+        train_loss_tensor = torch.tensor([train_loss]).to(rank)
+        dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
+        train_loss = train_loss_tensor.item() / ngpus_per_node
         
-        # Add this inside the training loop after each epoch
-        if torch.cuda.is_available():
-            print(f"GPU memory usage: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+        if is_main_process:
+            print(f"Train loss: {train_loss:.4f}")
+            train_losses.append(train_loss)
         
-        # Save best model
-        if val_loss < best_loss:
-            best_loss = val_loss
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': val_loss,
-                'config': {k: v for k, v in config.__dict__.items()},  # Save config too
-                'vocab': {
-                    'char_to_idx': dataset.char_to_idx,
-                    'idx_to_char': dataset.idx_to_char
-                }
-            }, checkpoint_path)
-            print(f"Saved new best model with loss: {val_loss:.4f}")
-        
-        # Generate some text every 10 epochs
-        if (epoch + 1) % 10 == 0:
-            sample_text = generate_text(model, dataset, text[:50], 150)
-            print(f"\nGenerated text:\n{sample_text}\n")
-    
-    # If we're resuming past all epochs, do one evaluation to get val_loss
-    if start_epoch >= config.epochs:
-        print("\nAlready trained for requested epochs, evaluating model...")
-        val_loss = evaluate(model, dataloader, criterion, config)
-        print(f"Current validation loss: {val_loss:.4f}")
-    
-    # Save final model regardless of performance
-    final_path = 'final_model.pt'
-    torch.save({
-        'epoch': max(config.epochs - 1, start_epoch),  # Use the highest epoch number
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': val_loss,
-        'config': {k: v for k, v in config.__dict__.items()},
-        'vocab': {
-            'char_to_idx': dataset.char_to_idx,
-            'idx_to_char': dataset.idx_to_char
-        }
-    }, final_path)
-    print(f"Saved final model to {final_path}")
-    
-    # Final evaluation using best model
-    print("\nTraining complete!")
-    model.load_state_dict(torch.load(checkpoint_path)['model_state_dict'])
-    val_loss = evaluate(model, dataloader, criterion, config)
-    print(f"Final validation loss: {val_loss:.4f}")
-    
-    # Generate text from the best model
-    print("\nGenerating text from the best model:")
-    sample_text = generate_text(
-        model, 
-        dataset, 
-        text[:50],  # Start with first 50 chars
-        1000,       # Generate 1000 more chars
-        temperature=0.7  # Lower temperature for more accurate reproduction
-    )
-    print(f"\nGenerated text:\n{sample_text}\n")
-    
-    # Replace the plotting code at the end of main() with this enhanced version:
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-        
-        # Create a figure with two subplots: full range and zoomed in
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-        
-        # Full range plot (with both linear and log scale options)
-        epochs = range(1, len(train_losses) + 1)
-        ax1.plot(epochs, train_losses, 'b-', linewidth=2, label='Training Loss')
-        ax1.plot(epochs, val_losses, 'r-', linewidth=2, label='Validation Loss')
-        ax1.set_title('Full Training History', fontsize=14)
-        ax1.set_ylabel('Loss', fontsize=12)
-        ax1.legend(fontsize=12)
-        ax1.grid(True, linestyle='--', alpha=0.7)
-        
-        # Add log scale toggle comment
-        ax1.text(0.02, 0.05, "Tip: For log scale, uncomment the line: ax1.set_yscale('log')", 
-                 transform=ax1.transAxes, fontsize=10, alpha=0.7)
-        
-        # Uncomment this line to use log scale for better visibility of changes:
-        # ax1.set_yscale('log')
-        
-        # Zoomed-in on the last 80% of training
-        start_idx = len(train_losses) // 5  # Skip the first 20% of training
-        ax2.plot(epochs[start_idx:], train_losses[start_idx:], 'b-', linewidth=2, label='Training Loss')
-        ax2.plot(epochs[start_idx:], val_losses[start_idx:], 'r-', linewidth=2, label='Validation Loss')
-        ax2.set_title('Zoomed View (Last 80% of Training)', fontsize=14)
-        ax2.set_xlabel('Epochs', fontsize=12)
-        ax2.set_ylabel('Loss', fontsize=12)
-        ax2.legend(fontsize=12)
-        ax2.grid(True, linestyle='--', alpha=0.7)
-        
-        # Add dynamic y-axis limit based on data
-        min_loss = min(min(train_losses[start_idx:]), min(val_losses[start_idx:]))
-        max_loss = max(max(train_losses[start_idx:]), max(val_losses[start_idx:]))
-        margin = (max_loss - min_loss) * 0.1  # Add 10% margin
-        ax2.set_ylim(max(0, min_loss - margin), max_loss + margin)
-        
-        # Add some annotations
-        min_val_loss_idx = np.argmin(val_losses)
-        ax2.axvline(x=min_val_loss_idx + 1, color='g', linestyle='--', alpha=0.5)
-        ax2.text(min_val_loss_idx + 1.5, min(val_losses) * 1.05, 
-                 f'Best model: epoch {min_val_loss_idx + 1}\nLoss: {min(val_losses):.6f}', 
-                 fontsize=10)
-        
-        # Highlight trend with moving average
-        window_size = max(3, len(train_losses) // 20)  # Dynamic window size
-        if len(train_losses) > window_size * 2:
-            # Calculate moving averages
-            train_ma = np.convolve(train_losses, np.ones(window_size)/window_size, mode='valid')
-            val_ma = np.convolve(val_losses, np.ones(window_size)/window_size, mode='valid')
-            ma_epochs = epochs[window_size-1:]
+        # Evaluate - only needed on one process to avoid duplicate work
+        if is_main_process:
+            val_loss = evaluate(model, dataloader, criterion, config)
+            print(f"Validation loss: {val_loss:.4f}")
+            val_losses.append(val_loss)
             
-            # Add to second plot
-            ax2.plot(ma_epochs, train_ma, 'b--', alpha=0.5, linewidth=1.5, label='Train (Moving Avg)')
-            ax2.plot(ma_epochs, val_ma, 'r--', alpha=0.5, linewidth=1.5, label='Val (Moving Avg)')
+            # Add this inside the training loop after each epoch
+            if torch.cuda.is_available():
+                print(f"GPU memory usage: {torch.cuda.memory_allocated(rank) / 1024**2:.2f} MB")
+            
+            # Save best model
+            if val_loss < best_loss:
+                best_loss = val_loss
+                # Save model without 'module.' prefix for easier loading
+                model_state_dict = {k.replace('module.', ''): v for k, v in model.state_dict().items()}
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model_state_dict,
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': val_loss,
+                    'config': {k: v for k, v in config.__dict__.items()},
+                    'vocab': {
+                        'char_to_idx': dataset.char_to_idx,
+                        'idx_to_char': dataset.idx_to_char
+                    }
+                }, checkpoint_path)
+                print(f"Saved new best model with loss: {val_loss:.4f}")
+            
+            # Generate text occasionally
+            if (epoch + 1) % 10 == 0:
+                # For generating text, use the model without DDP wrapper
+                unwrapped_model = model.module
+                sample_text = generate_text(unwrapped_model, dataset, text[:50], 150)
+                print(f"\nGenerated text:\n{sample_text}\n")
+    
+    # Clean up distributed training resources
+    dist.destroy_process_group()
+    
+    # Final operations only on main process
+    if is_main_process:
+        # Save final model
+        final_path = 'final_model.pt'
+        model_state_dict = {k.replace('module.', ''): v for k, v in model.state_dict().items()}
+        torch.save({
+            'epoch': max(config.epochs - 1, start_epoch),
+            'model_state_dict': model_state_dict,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': val_loss,
+            'config': {k: v for k, v in config.__dict__.items()},
+            'vocab': {
+                'char_to_idx': dataset.char_to_idx,
+                'idx_to_char': dataset.idx_to_char
+            }
+        }, final_path)
+        print(f"Saved final model to {final_path}")
         
-        plt.tight_layout()
-        plt.savefig('training_curve_enhanced.png', dpi=300)
-        print("Saved enhanced training curve to training_curve_enhanced.png")
+        # Final evaluation using best model
+        print("\nTraining complete!")
+        best_model_state = torch.load(checkpoint_path)['model_state_dict']
+        # Load directly to module without DDP for evaluation
+        unwrapped_model = model.module
+        unwrapped_model.load_state_dict(best_model_state)
+        val_loss = evaluate(unwrapped_model, dataloader, criterion, config)
+        print(f"Final validation loss: {val_loss:.4f}")
         
-        # Create a secondary plot with log scale for better visibility of small changes
-        plt.figure(figsize=(10, 6))
-        plt.plot(epochs, train_losses, 'b-', label='Training Loss')
-        plt.plot(epochs, val_losses, 'r-', label='Validation Loss')
-        plt.xlabel('Epochs', fontsize=12)
-        plt.ylabel('Loss (log scale)', fontsize=12)
-        plt.title('Training Progress with Logarithmic Scale', fontsize=14)
-        plt.yscale('log')
-        plt.grid(True, which="both", linestyle='--', alpha=0.7)
-        plt.legend(fontsize=12)
-        plt.tight_layout()
-        plt.savefig('training_curve_log.png')
-        print("Saved logarithmic scale training curve to training_curve_log.png")
+        # Generate final text sample
+        sample_text = generate_text(unwrapped_model, dataset, text[:50], 1000, temperature=0.7)
+        print(f"\nGenerated text:\n{sample_text}\n")
         
-    except ImportError:
-        print("Could not generate training curve plot: matplotlib not available")
+        # Plot training curve (existing plotting code)
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            # Your existing plotting code...
+        except ImportError:
+            print("Could not generate training curve plot: matplotlib not available")
+
+def main():
+    # Parse command line arguments
+    args = parse_args()
+    
+    # Get number of available GPUs
+    ngpus_per_node = torch.cuda.device_count()
+    
+    if ngpus_per_node > 1:
+        print(f"Using {ngpus_per_node} GPUs for distributed training")
+        # Use multiprocessing to spawn one process per GPU
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+    else:
+        print("Only one GPU detected, running without distributed training")
+        # Fall back to single GPU training
+        main_worker(0, 1, args)
 
 if __name__ == "__main__":
     main()
