@@ -203,103 +203,91 @@ void Mesh::setTextureCoord(int vertexIndex, float u, float v) {
 
 // Add this implementation
 Mesh Mesh::createTexturedCube(float size, uint32_t color) {
-    Mesh cube = createCube(size, color);
+    Mesh cube;
+    float halfSize = size / 2.0f;
+    
+    // The 8 corners of the cube
+    Vector3 v0(-halfSize, -halfSize, -halfSize); // back bottom left
+    Vector3 v1(halfSize, -halfSize, -halfSize);  // back bottom right
+    Vector3 v2(halfSize, halfSize, -halfSize);   // back top right
+    Vector3 v3(-halfSize, halfSize, -halfSize);  // back top left
+    Vector3 v4(-halfSize, -halfSize, halfSize);  // front bottom left
+    Vector3 v5(halfSize, -halfSize, halfSize);   // front bottom right
+    Vector3 v6(halfSize, halfSize, halfSize);    // front top right
+    Vector3 v7(-halfSize, halfSize, halfSize);   // front top left
+    
+    // Create all vertices for each face with proper texture coordinates
+    // Front face (Z+)
+    int idx = 0;
+    cube.addVertex(Vertex(v4, color, 0.0f, 1.0f)); // bottom left
+    idx++;
+    cube.addVertex(Vertex(v5, color, 1.0f, 1.0f)); // bottom right
+    idx++;
+    cube.addVertex(Vertex(v6, color, 1.0f, 0.0f)); // top right
+    idx++;
+    cube.addVertex(Vertex(v7, color, 0.0f, 0.0f)); // top left
+    idx++;
+    
+    // Back face (Z-)
+    cube.addVertex(Vertex(v1, color, 0.0f, 1.0f)); // bottom left
+    idx++;
+    cube.addVertex(Vertex(v0, color, 1.0f, 1.0f)); // bottom right
+    idx++;
+    cube.addVertex(Vertex(v3, color, 1.0f, 0.0f)); // top right
+    idx++;
+    cube.addVertex(Vertex(v2, color, 0.0f, 0.0f)); // top left
+    idx++;
+    
+    // Right face (X+)
+    cube.addVertex(Vertex(v5, color, 0.0f, 1.0f)); // bottom left
+    idx++;
+    cube.addVertex(Vertex(v1, color, 1.0f, 1.0f)); // bottom right
+    idx++;
+    cube.addVertex(Vertex(v2, color, 1.0f, 0.0f)); // top right
+    idx++;
+    cube.addVertex(Vertex(v6, color, 0.0f, 0.0f)); // top left
+    idx++;
+    
+    // Left face (X-)
+    cube.addVertex(Vertex(v0, color, 0.0f, 1.0f)); // bottom left
+    idx++;
+    cube.addVertex(Vertex(v4, color, 1.0f, 1.0f)); // bottom right
+    idx++;
+    cube.addVertex(Vertex(v7, color, 1.0f, 0.0f)); // top right
+    idx++;
+    cube.addVertex(Vertex(v3, color, 0.0f, 0.0f)); // top left
+    idx++;
+    
+    // Top face (Y+)
+    cube.addVertex(Vertex(v7, color, 0.0f, 1.0f)); // bottom left
+    idx++;
+    cube.addVertex(Vertex(v6, color, 1.0f, 1.0f)); // bottom right
+    idx++;
+    cube.addVertex(Vertex(v2, color, 1.0f, 0.0f)); // top right
+    idx++;
+    cube.addVertex(Vertex(v3, color, 0.0f, 0.0f)); // top left
+    idx++;
+    
+    // Bottom face (Y-)
+    cube.addVertex(Vertex(v0, color, 0.0f, 1.0f)); // bottom left
+    idx++;
+    cube.addVertex(Vertex(v1, color, 1.0f, 1.0f)); // bottom right
+    idx++;
+    cube.addVertex(Vertex(v5, color, 1.0f, 0.0f)); // top right
+    cube.addVertex(Vertex(v4, color, 0.0f, 0.0f)); // top left
+    
+    // Create triangles - use consistent winding order for all faces
+    // Each face has 4 vertices and 2 triangles
+    for (int i = 0; i < 6; i++) {
+        int baseIdx = i * 4;
+        // First triangle (bottom left, top left, top right)
+        cube.addTriangle(baseIdx, baseIdx + 3, baseIdx + 2);
+        // Second triangle (bottom left, top right, bottom right)
+        cube.addTriangle(baseIdx, baseIdx + 2, baseIdx + 1);
+    }
+    
+    // Set has texture coords flag
     cube.hasTexCoords = true;
-    
-    // Define texture coordinates for each face of the cube
-    // The cube has 8 vertices but we need different texture coordinates for each face
-    // So we need to redefine the triangles and assign appropriate texture coordinates
-    
-    // We'll clear the existing vertices and triangles
-    std::vector<Vertex> originalVertices = cube.vertices;
-    cube.vertices.clear();
-    cube.triangles.clear();
-    
-    // Create vertices for each face with appropriate texture coordinates
-    // Front face (4 vertices, 2 triangles)
-    int frontBL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[4].position, color, 0.0f, 1.0f)); // Bottom-left
-    int frontBR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[5].position, color, 1.0f, 1.0f)); // Bottom-right
-    int frontTR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[6].position, color, 1.0f, 0.0f)); // Top-right
-    int frontTL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[7].position, color, 0.0f, 0.0f)); // Top-left
-    
-    // Back face (4 vertices, 2 triangles)
-    int backBR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[0].position, color, 0.0f, 1.0f)); // Bottom-right
-    int backBL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[1].position, color, 1.0f, 1.0f)); // Bottom-left
-    int backTL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[2].position, color, 1.0f, 0.0f)); // Top-left
-    int backTR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[3].position, color, 0.0f, 0.0f)); // Top-right
-    
-    // Left face (4 vertices, 2 triangles)
-    int leftBL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[0].position, color, 0.0f, 1.0f)); // Bottom-left
-    int leftBR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[4].position, color, 1.0f, 1.0f)); // Bottom-right
-    int leftTR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[7].position, color, 1.0f, 0.0f)); // Top-right
-    int leftTL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[3].position, color, 0.0f, 0.0f)); // Top-left
-    
-    // Right face (4 vertices, 2 triangles)
-    int rightBL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[1].position, color, 0.0f, 1.0f)); // Bottom-left
-    int rightBR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[5].position, color, 1.0f, 1.0f)); // Bottom-right
-    int rightTR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[6].position, color, 1.0f, 0.0f)); // Top-right
-    int rightTL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[2].position, color, 0.0f, 0.0f)); // Top-left
-    
-    // Top face (4 vertices, 2 triangles)
-    int topBL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[3].position, color, 0.0f, 1.0f)); // Bottom-left
-    int topBR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[2].position, color, 1.0f, 1.0f)); // Bottom-right
-    int topTR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[6].position, color, 1.0f, 0.0f)); // Top-right
-    int topTL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[7].position, color, 0.0f, 0.0f)); // Top-left
-    
-    // Bottom face (4 vertices, 2 triangles)
-    int bottomBL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[0].position, color, 0.0f, 1.0f)); // Bottom-left
-    int bottomBR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[1].position, color, 1.0f, 1.0f)); // Bottom-right
-    int bottomTR = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[5].position, color, 1.0f, 0.0f)); // Top-right
-    int bottomTL = cube.vertices.size();
-    cube.addVertex(Vertex(originalVertices[4].position, color, 0.0f, 0.0f)); // Top-left
-    
-    // Add triangles for each face
-    // Front face
-    cube.addTriangle(frontBL, frontTR, frontBR);
-    cube.addTriangle(frontBL, frontTL, frontTR);
-    
-    // Back face
-    cube.addTriangle(backBL, backTR, backBR);
-    cube.addTriangle(backBL, backTL, backTR);
-    
-    // Left face
-    cube.addTriangle(leftBL, leftTR, leftBR);
-    cube.addTriangle(leftBL, leftTL, leftTR);
-    
-    // Right face
-    cube.addTriangle(rightBL, rightTR, rightBR);
-    cube.addTriangle(rightBL, rightTL, rightTR);
-    
-    // Top face
-    cube.addTriangle(topBL, topTR, topBR);
-    cube.addTriangle(topBL, topTL, topTR);
-    
-    // Bottom face
-    cube.addTriangle(bottomBL, bottomTR, bottomBR);
-    cube.addTriangle(bottomBL, bottomTL, bottomTR);
     
     // Generate edges for wireframe rendering
     cube.generateEdgesFromTriangles();
