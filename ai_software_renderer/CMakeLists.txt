@@ -37,7 +37,7 @@ set(HEADERS
     include/q2mesh.h
 )
 
-# Create executable
+# Create main executable
 add_executable(SoftwareRenderer ${SOURCES} ${HEADERS})
 
 # Link against SDL2 libraries

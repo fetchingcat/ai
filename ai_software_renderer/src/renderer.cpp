@@ -2,9 +2,14 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <algorithm>
+#include <limits>
+#include <cmath>
 
 // Pixel buffer that we'll render to
 static uint32_t* pixelBuffer = NULL;
+
+// Z-buffer (depth buffer)
+static float* depthBuffer = NULL;
 
 // SDL window and renderer
 static SDL_Window* window = NULL;
@@ -50,6 +55,17 @@ bool initSDL() {
         return false;
     }
     
+    // Allocate depth buffer
+    depthBuffer = (float*)malloc(WINDOW_WIDTH * WINDOW_HEIGHT * sizeof(float));
+    if (!depthBuffer) {
+        printf("Failed to allocate depth buffer!\n");
+        free(pixelBuffer);
+        return false;
+    }
+    
+    // Clear the depth buffer
+    clearDepthBuffer();
+    
     return true;
 }
 
@@ -59,9 +75,30 @@ void clearBuffer(uint32_t color) {
     }
 }
 
+void clearDepthBuffer() {
+    // Initialize depth buffer to maximum depth (far away)
+    // Note: In our coordinate system, smaller Z values are farther from camera
+    // Adjust the range based on your coordinate system
+    for (int i = 0; i < WINDOW_WIDTH * WINDOW_HEIGHT; i++) {
+        depthBuffer[i] = std::numeric_limits<float>::infinity();
+    }
+}
+
 void putPixel(int x, int y, uint32_t color) {
     if (x >= 0 && x < WINDOW_WIDTH && y >= 0 && y < WINDOW_HEIGHT) {
         pixelBuffer[y * WINDOW_WIDTH + x] = color;
+    }
+}
+
+void putPixelWithDepth(int x, int y, float z, uint32_t color) {
+    if (x >= 0 && x < WINDOW_WIDTH && y >= 0 && y < WINDOW_HEIGHT) {
+        int index = y * WINDOW_WIDTH + x;
+        
+        // Only draw the pixel if it's closer (smaller z) than what's already there
+        if (z < depthBuffer[index]) {
+            pixelBuffer[index] = color;
+            depthBuffer[index] = z;
+        }
     }
 }
 
@@ -181,6 +218,7 @@ void renderBuffer() {
 
 void cleanup() {
     if (pixelBuffer) free(pixelBuffer);
+    if (depthBuffer) free(depthBuffer);
     if (texture) SDL_DestroyTexture(texture);
     if (renderer) SDL_DestroyRenderer(renderer);
     if (window) SDL_DestroyWindow(window);
@@ -517,5 +555,318 @@ void setPixel(int x, int y, uint32_t color) {
     if (x >= 0 && x < WINDOW_WIDTH && y >= 0 && y < WINDOW_HEIGHT) {
         // Set the pixel in our buffer
         pixelBuffer[y * WINDOW_WIDTH + x] = color;
+    }
+}
+
+// Implement new 3D line drawing with z-interpolation
+void drawLine3D(int x1, int y1, float z1, int x2, int y2, float z2, uint32_t color) {
+    // Bresenham's line algorithm with z-interpolation
+    int dx = abs(x2 - x1);
+    int dy = -abs(y2 - y1);
+    int sx = x1 < x2 ? 1 : -1;
+    int sy = y1 < y2 ? 1 : -1;
+    int err = dx + dy;
+    int e2;
+    
+    // Calculate total steps for interpolation
+    float totalSteps = std::max(dx, -dy);
+    float currentStep = 0;
+    
+    while (true) {
+        // For wireframe rendering, we want the lines to be always visible
+        // regardless of depth, so we use putPixel instead of putPixelWithDepth
+        if (x1 >= 0 && x1 < WINDOW_WIDTH && y1 >= 0 && y1 < WINDOW_HEIGHT) {
+            putPixel(x1, y1, color);
+        }
+        
+        if (x1 == x2 && y1 == y2) break;
+        e2 = 2 * err;
+        if (e2 >= dy) {
+            if (x1 == x2) break;
+            err += dy;
+            x1 += sx;
+            currentStep += 1;
+        }
+        if (e2 <= dx) {
+            if (y1 == y2) break;
+            err += dx;
+            y1 += sy;
+            currentStep += 1;
+        }
+    }
+}
+
+// Add 3D triangle drawing with depth interpolation
+void drawFilledTriangle3D(
+    int x1, int y1, float z1,
+    int x2, int y2, float z2,
+    int x3, int y3, float z3,
+    uint32_t color) {
+    
+    // Sort vertices by y-coordinate (y1 <= y2 <= y3)
+    if (y1 > y2) {
+        std::swap(y1, y2);
+        std::swap(x1, x2);
+        std::swap(z1, z2);
+    }
+    if (y2 > y3) {
+        std::swap(y2, y3);
+        std::swap(x2, x3);
+        std::swap(z2, z3);
+    }
+    if (y1 > y2) {
+        std::swap(y1, y2);
+        std::swap(x1, x2);
+        std::swap(z1, z2);
+    }
+    
+    // Calculate triangle area for barycentric coordinates
+    float area = (x1 * (y2 - y3) + x2 * (y3 - y1) + x3 * (y1 - y2)) / 2.0f;
+    
+    // Flat bottom triangle
+    if (y2 == y3) {
+        // Sort x2 and x3 so that x2 is on the left
+        if (x2 > x3) {
+            std::swap(x2, x3);
+            std::swap(z2, z3);
+        }
+        
+        for (int y = y1; y <= y2; y++) {
+            float alpha = (float)(y - y1) / (float)(y2 - y1);
+            int x_start = x1 + alpha * (x2 - x1);
+            int x_end = x1 + alpha * (x3 - x1);
+            
+            // Interpolate z at the edges
+            float z_start = z1 + alpha * (z2 - z1);
+            float z_end = z1 + alpha * (z3 - z1);
+            
+            if (x_start > x_end) {
+                std::swap(x_start, x_end);
+                std::swap(z_start, z_end);
+            }
+            
+            for (int x = x_start; x <= x_end; x++) {
+                // Interpolate z along the scanline
+                float t = (x_end == x_start) ? 0 : (float)(x - x_start) / (float)(x_end - x_start);
+                float z = z_start + t * (z_end - z_start);
+                
+                // Depth test when drawing
+                putPixelWithDepth(x, y, z, color);
+            }
+        }
+    }
+    // Flat top triangle
+    else if (y1 == y2) {
+        // Sort x1 and x2 so that x1 is on the left
+        if (x1 > x2) {
+            std::swap(x1, x2);
+            std::swap(z1, z2);
+        }
+        
+        for (int y = y1; y <= y3; y++) {
+            float alpha = (float)(y - y1) / (float)(y3 - y1);
+            int x_start = x1 + alpha * (x3 - x1);
+            int x_end = x2 + alpha * (x3 - x2);
+            
+            // Interpolate z at the edges
+            float z_start = z1 + alpha * (z3 - z1);
+            float z_end = z2 + alpha * (z3 - z2);
+            
+            if (x_start > x_end) {
+                std::swap(x_start, x_end);
+                std::swap(z_start, z_end);
+            }
+            
+            for (int x = x_start; x <= x_end; x++) {
+                // Interpolate z along the scanline
+                float t = (x_end == x_start) ? 0 : (float)(x - x_start) / (float)(x_end - x_start);
+                float z = z_start + t * (z_end - z_start);
+                
+                // Depth test when drawing
+                putPixelWithDepth(x, y, z, color);
+            }
+        }
+    }
+    // General case - split into flat bottom and flat top triangles
+    else {
+        int x4 = x1 + ((float)(y2 - y1) / (float)(y3 - y1)) * (x3 - x1);
+        float z4 = z1 + ((float)(y2 - y1) / (float)(y3 - y1)) * (z3 - z1);
+        
+        // Draw flat bottom triangle (top half)
+        for (int y = y1; y <= y2; y++) {
+            float alpha = (y - y1) / (float)(y2 - y1);
+            int x_start = x1 + alpha * (x2 - x1);
+            int x_end = x1 + alpha * (x4 - x1);
+            
+            // Interpolate z at the edges
+            float z_start = z1 + alpha * (z2 - z1);
+            float z_end = z1 + alpha * (z4 - z1);
+            
+            if (x_start > x_end) {
+                std::swap(x_start, x_end);
+                std::swap(z_start, z_end);
+            }
+            
+            for (int x = x_start; x <= x_end; x++) {
+                // Interpolate z along the scanline
+                float t = (x_end == x_start) ? 0 : (float)(x - x_start) / (float)(x_end - x_start);
+                float z = z_start + t * (z_end - z_start);
+                
+                // Depth test when drawing
+                putPixelWithDepth(x, y, z, color);
+            }
+        }
+        
+        // Draw flat top triangle (bottom half)
+        for (int y = y2; y <= y3; y++) {
+            float alpha = (y - y2) / (float)(y3 - y2);
+            int x_start = x2 + alpha * (x3 - x2);
+            int x_end = x4 + alpha * (x3 - x4);
+            
+            // Interpolate z at the edges
+            float z_start = z2 + alpha * (z3 - z2);
+            float z_end = z4 + alpha * (z3 - z4);
+            
+            if (x_start > x_end) {
+                std::swap(x_start, x_end);
+                std::swap(z_start, z_end);
+            }
+            
+            for (int x = x_start; x <= x_end; x++) {
+                // Interpolate z along the scanline
+                float t = (x_end == x_start) ? 0 : (float)(x - x_start) / (float)(x_end - x_start);
+                float z = z_start + t * (z_end - z_start);
+                
+                // Depth test when drawing
+                putPixelWithDepth(x, y, z, color);
+            }
+        }
+    }
+}
+
+// Implement textured triangle drawing with z-buffer
+void drawTexturedTriangle3D(
+    int x1, int y1, float z1, float u1, float v1,
+    int x2, int y2, float z2, float u2, float v2,
+    int x3, int y3, float z3, float u3, float v3,
+    SDL_Surface* texture) {
+    
+    // Sort vertices by y-coordinate (y1 <= y2 <= y3)
+    if (y1 > y2) {
+        std::swap(y1, y2); std::swap(x1, x2); std::swap(z1, z2);
+        std::swap(u1, u2); std::swap(v1, v2);
+    }
+    if (y2 > y3) {
+        std::swap(y2, y3); std::swap(x2, x3); std::swap(z2, z3);
+        std::swap(u2, u3); std::swap(v2, v3);
+    }
+    if (y1 > y2) {
+        std::swap(y1, y2); std::swap(x1, x2); std::swap(z1, z2);
+        std::swap(u1, u2); std::swap(v1, v2);
+    }
+    
+    // Calculate edges
+    int totalHeight = y3 - y1;
+    
+    // First half of the triangle (flat bottom)
+    for (int y = y1; y <= y2; y++) {
+        int segmentHeight = y2 - y1;
+        float alpha = segmentHeight == 0 ? 0 : (float)(y - y1) / segmentHeight;
+        
+        // Edge x points and interpolated values
+        float x_a = x1 + (x2 - x1) * alpha;
+        float x_b = x1 + (x3 - x1) * ((float)(y - y1) / totalHeight);
+        
+        // Interpolate z, u, v for the edges
+        float z_a = z1 + (z2 - z1) * alpha;
+        float z_b = z1 + (z3 - z1) * ((float)(y - y1) / totalHeight);
+        
+        float u_a = u1 + (u2 - u1) * alpha;
+        float u_b = u1 + (u3 - u1) * ((float)(y - y1) / totalHeight);
+        
+        float v_a = v1 + (v2 - v1) * alpha;
+        float v_b = v1 + (v3 - v1) * ((float)(y - y1) / totalHeight);
+        
+        // Ensure x_a is on the left
+        if (x_a > x_b) {
+            std::swap(x_a, x_b); std::swap(z_a, z_b);
+            std::swap(u_a, u_b); std::swap(v_a, v_b);
+        }
+        
+        // Draw horizontal line
+        for (int x = (int)x_a; x <= (int)x_b; x++) {
+            float t = (x_b == x_a) ? 0 : (float)(x - x_a) / (x_b - x_a);
+            
+            // Interpolate values along the scanline
+            float z = z_a + (z_b - z_a) * t;
+            float u = u_a + (u_b - u_a) * t;
+            float v = v_a + (v_b - v_a) * t;
+            
+            // Sample texture (with bounds checking)
+            int tx = (int)(u * texture->w);
+            int ty = (int)(v * texture->h);
+            
+            // Clamp texture coordinates
+            tx = std::max(0, std::min(tx, texture->w - 1));
+            ty = std::max(0, std::min(ty, texture->h - 1));
+            
+            // Get pixel from texture
+            uint32_t* pixels = (uint32_t*)texture->pixels;
+            uint32_t color = pixels[ty * texture->w + tx];
+            
+            // Draw pixel with depth test
+            putPixelWithDepth(x, y, z, color);
+        }
+    }
+    
+    // Second half of the triangle (flat top)
+    for (int y = y2; y <= y3; y++) {
+        int segmentHeight = y3 - y2;
+        float alpha = segmentHeight == 0 ? 0 : (float)(y - y2) / segmentHeight;
+        
+        // Edge x points and interpolated values
+        float x_a = x2 + (x3 - x2) * alpha;
+        float x_b = x1 + (x3 - x1) * ((float)(y - y1) / totalHeight);
+        
+        // Interpolate z, u, v for the edges
+        float z_a = z2 + (z3 - z2) * alpha;
+        float z_b = z1 + (z3 - z1) * ((float)(y - y1) / totalHeight);
+        
+        float u_a = u2 + (u3 - u2) * alpha;
+        float u_b = u1 + (u3 - u1) * ((float)(y - y1) / totalHeight);
+        
+        float v_a = v2 + (v3 - v2) * alpha;
+        float v_b = v1 + (v3 - v1) * ((float)(y - y1) / totalHeight);
+        
+        // Ensure x_a is on the left
+        if (x_a > x_b) {
+            std::swap(x_a, x_b); std::swap(z_a, z_b);
+            std::swap(u_a, u_b); std::swap(v_a, v_b);
+        }
+        
+        // Draw horizontal line
+        for (int x = (int)x_a; x <= (int)x_b; x++) {
+            float t = (x_b == x_a) ? 0 : (float)(x - x_a) / (x_b - x_a);
+            
+            // Interpolate values along the scanline
+            float z = z_a + (z_b - z_a) * t;
+            float u = u_a + (u_b - u_a) * t;
+            float v = v_a + (v_b - v_a) * t;
+            
+            // Sample texture (with bounds checking)
+            int tx = (int)(u * texture->w);
+            int ty = (int)(v * texture->h);
+            
+            // Clamp texture coordinates
+            tx = std::max(0, std::min(tx, texture->w - 1));
+            ty = std::max(0, std::min(ty, texture->h - 1));
+            
+            // Get pixel from texture
+            uint32_t* pixels = (uint32_t*)texture->pixels;
+            uint32_t color = pixels[ty * texture->w + tx];
+            
+            // Draw pixel with depth test
+            putPixelWithDepth(x, y, z, color);
+        }
     }
 }

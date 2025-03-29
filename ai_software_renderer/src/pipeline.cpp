@@ -55,7 +55,7 @@ bool Pipeline::isFrontFacing(const Vector3& v1, const Vector3& v2, const Vector3
     
     // A positive cross product means counter-clockwise winding in screen space,
     // which typically means the triangle is front-facing
-    return crossProduct > 0; // CHANGED TO > 0
+    return crossProduct > 0; // Original behavior
 }
 
 void Pipeline::toggleBackfaceCulling() {
@@ -94,6 +94,11 @@ void Pipeline::drawWireframe(uint32_t color) {
         float x3 = (tv3.x / tv3.w) * (WINDOW_WIDTH / 2) + (WINDOW_WIDTH / 2);
         float y3 = (-tv3.y / tv3.w) * (WINDOW_HEIGHT / 2) + (WINDOW_HEIGHT / 2);
         
+        // Get z values for depth testing (1/w gives us the correct depth)
+        float z1 = 1.0f / tv1.w;
+        float z2 = 1.0f / tv2.w;
+        float z3 = 1.0f / tv3.w;
+        
         // Backface culling - skip triangles facing away from the camera
         if (enableBackfaceCulling) {
             Vector3 screen1(x1, y1, 0);
@@ -104,10 +109,10 @@ void Pipeline::drawWireframe(uint32_t color) {
             }
         }
         
-        // Draw the edges of this triangle
-        drawLine((int)x1, (int)y1, (int)x2, (int)y2, color);
-        drawLine((int)x2, (int)y2, (int)x3, (int)y3, color);
-        drawLine((int)x3, (int)y3, (int)x1, (int)y1, color);
+        // Draw the edges of this triangle with depth information
+        drawLine3D((int)x1, (int)y1, z1, (int)x2, (int)y2, z2, color);
+        drawLine3D((int)x2, (int)y2, z2, (int)x3, (int)y3, z3, color);
+        drawLine3D((int)x3, (int)y3, z3, (int)x1, (int)y1, z1, color);
     }
 }
 
@@ -115,6 +120,9 @@ void Pipeline::drawSolidFlat(LightingSystem& lighting) {
     if (!currentMesh) {
         return;
     }
+    
+    // Clear the depth buffer before drawing
+    clearDepthBuffer();
     
     // Draw each triangle
     for (const auto& triangle : currentMesh->triangles) {
@@ -154,6 +162,11 @@ void Pipeline::drawSolidFlat(LightingSystem& lighting) {
         int y2 = (int)((-ndcy2 + 1.0f) * (WINDOW_HEIGHT / 2));
         int x3 = (int)((ndcx3 + 1.0f) * (WINDOW_WIDTH / 2));
         int y3 = (int)((-ndcy3 + 1.0f) * (WINDOW_HEIGHT / 2));
+        
+        // Calculate z values for depth buffer (1/w gives us perspective-correct depth)
+        float z1 = 1.0f / tv1.w;
+        float z2 = 1.0f / tv2.w;
+        float z3 = 1.0f / tv3.w;
         
         // Backface culling - skip triangles facing away from the camera
         if (enableBackfaceCulling) {
@@ -202,7 +215,86 @@ void Pipeline::drawSolidFlat(LightingSystem& lighting) {
         // Calculate the final color with lighting
         uint32_t finalColor = lighting.calculateFlatShading(normal, center, baseColor);
         
-        // Draw filled triangle
-        fillTriangle(x1, y1, x2, y2, x3, y3, finalColor);
+        // Draw filled triangle with depth testing
+        drawFilledTriangle3D(x1, y1, z1, x2, y2, z2, x3, y3, z3, finalColor);
+    }
+}
+
+void Pipeline::drawTextured(SDL_Surface* texture) {
+    if (!currentMesh || !texture) {
+        return;
+    }
+    
+    // Clear the depth buffer before drawing
+    clearDepthBuffer();
+    
+    // Draw each triangle
+    for (const auto& triangle : currentMesh->triangles) {
+        if (triangle.v1 >= transformedVertices.size() ||
+            triangle.v2 >= transformedVertices.size() ||
+            triangle.v3 >= transformedVertices.size()) {
+            continue;
+        }
+        
+        // Get transformed vertices
+        Vector4& tv1 = transformedVertices[triangle.v1];
+        Vector4& tv2 = transformedVertices[triangle.v2];
+        Vector4& tv3 = transformedVertices[triangle.v3];
+        
+        // Skip if any vertex is behind the camera
+        if (tv1.w <= 0 || tv2.w <= 0 || tv3.w <= 0) {
+            continue;
+        }
+        
+        // Perspective divide to get NDC coordinates
+        float ndcx1 = tv1.x / tv1.w;
+        float ndcy1 = tv1.y / tv1.w;
+        float ndcz1 = tv1.z / tv1.w;
+        
+        float ndcx2 = tv2.x / tv2.w;
+        float ndcy2 = tv2.y / tv2.w;
+        float ndcz2 = tv2.z / tv2.w;
+        
+        float ndcx3 = tv3.x / tv3.w;
+        float ndcy3 = tv3.y / tv3.w;
+        float ndcz3 = tv3.z / tv3.w;
+        
+        // Convert to screen space
+        int x1 = (int)((ndcx1 + 1.0f) * (WINDOW_WIDTH / 2));
+        int y1 = (int)((-ndcy1 + 1.0f) * (WINDOW_HEIGHT / 2));
+        int x2 = (int)((ndcx2 + 1.0f) * (WINDOW_WIDTH / 2));
+        int y2 = (int)((-ndcy2 + 1.0f) * (WINDOW_HEIGHT / 2));
+        int x3 = (int)((ndcx3 + 1.0f) * (WINDOW_WIDTH / 2));
+        int y3 = (int)((-ndcy3 + 1.0f) * (WINDOW_HEIGHT / 2));
+        
+        // Calculate z values for depth buffer (1/w gives us perspective-correct depth)
+        float z1 = 1.0f / tv1.w;
+        float z2 = 1.0f / tv2.w;
+        float z3 = 1.0f / tv3.w;
+        
+        // Backface culling - skip triangles facing away from the camera
+        if (enableBackfaceCulling) {
+            Vector3 screen1(x1, y1, 0);
+            Vector3 screen2(x2, y2, 0);
+            Vector3 screen3(x3, y3, 0);
+            if (!isFrontFacing(screen1, screen2, screen3)) {
+                continue;
+            }
+        }
+        
+        // Get texture coordinates from the original vertices
+        float u1 = currentMesh->vertices[triangle.v1].u;
+        float v1 = currentMesh->vertices[triangle.v1].v;
+        float u2 = currentMesh->vertices[triangle.v2].u;
+        float v2 = currentMesh->vertices[triangle.v2].v;
+        float u3 = currentMesh->vertices[triangle.v3].u;
+        float v3 = currentMesh->vertices[triangle.v3].v;
+        
+        // Draw textured triangle with z-buffer
+        drawTexturedTriangle3D(
+            x1, y1, z1, u1, v1,
+            x2, y2, z2, u2, v2,
+            x3, y3, z3, u3, v3,
+            texture);
     }
 }

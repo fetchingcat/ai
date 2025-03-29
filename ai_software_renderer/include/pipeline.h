@@ -43,6 +43,9 @@ public:
     // Draw the processed mesh as solid triangles with flat shading
     void drawSolidFlat(LightingSystem& lighting);
     
+    // Draw the processed mesh as textured triangles with z-buffering
+    void drawTextured(SDL_Surface* texture);
+    
     // Toggle backface culling
     void toggleBackfaceCulling();
     

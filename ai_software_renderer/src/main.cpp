@@ -17,8 +17,101 @@
 enum RenderMode {
     WIREFRAME_ONLY,
     SOLID_ONLY,
-    COMBINED
+    COMBINED,
+    TEXTURED     // New texture rendering mode
 };
+
+// Create a simple checkered texture without using SDL_image
+SDL_Surface* createCrateTexture() {
+    // Create surface
+    const int TEXTURE_SIZE = 256;
+    SDL_Surface* surface = SDL_CreateRGBSurface(0, TEXTURE_SIZE, TEXTURE_SIZE, 32, 
+                                               0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF);
+    if (!surface) {
+        printf("Surface could not be created! SDL Error: %s\n", SDL_GetError());
+        return NULL;
+    }
+    
+    // Lock the surface for direct access to the pixels
+    SDL_LockSurface(surface);
+    
+    // Get pointer to pixel data
+    Uint32* pixels = (Uint32*)surface->pixels;
+    
+    // Draw a checkered pattern
+    const int CHECKER_SIZE = 32; // Size of each checker square
+    const Uint32 DARK_BROWN = 0xFF804000;  // RGB: 128, 64, 0
+    const Uint32 LIGHT_BROWN = 0xFFA06030; // RGB: 160, 96, 48
+    
+    // Add wood grain texture by varying the colors slightly
+    for (int y = 0; y < TEXTURE_SIZE; y++) {
+        for (int x = 0; x < TEXTURE_SIZE; x++) {
+            // Determine base color from checker pattern
+            int checkerX = (x / CHECKER_SIZE) % 2;
+            int checkerY = (y / CHECKER_SIZE) % 2;
+            Uint32 baseColor = (checkerX ^ checkerY) ? DARK_BROWN : LIGHT_BROWN;
+            
+            // Add some wood grain variation
+            int grainVariation = ((x * 7) % 13) - 6; // Pseudo-random variation
+            
+            // Extract color components
+            Uint8 r = (baseColor >> 16) & 0xFF;
+            Uint8 g = (baseColor >> 8) & 0xFF;
+            Uint8 b = baseColor & 0xFF;
+            
+            // Apply variation (clamped to valid range)
+            r = (Uint8)SDL_max(0, SDL_min(255, (int)r + grainVariation));
+            g = (Uint8)SDL_max(0, SDL_min(255, (int)g + grainVariation));
+            b = (Uint8)SDL_max(0, SDL_min(255, (int)b + grainVariation));
+            
+            // Add border lines
+            if (x % CHECKER_SIZE == 0 || y % CHECKER_SIZE == 0) {
+                r = (Uint8)(r * 0.8); // Darken for borders
+                g = (Uint8)(g * 0.8);
+                b = (Uint8)(b * 0.8);
+            }
+            
+            // Combine back into RGBA
+            Uint32 color = (0xFF << 24) | (r << 16) | (g << 8) | b;
+            
+            // Set pixel
+            pixels[y * surface->w + x] = color;
+        }
+    }
+    
+    // Unlock surface
+    SDL_UnlockSurface(surface);
+    
+    return surface;
+}
+
+// Simpler createColorTexture helper
+SDL_Surface* createColorTexture(Uint32 color) {
+    // Create surface
+    const int TEXTURE_SIZE = 64;
+    SDL_Surface* surface = SDL_CreateRGBSurface(0, TEXTURE_SIZE, TEXTURE_SIZE, 32, 
+                                               0xFF000000, 0x00FF0000, 0x0000FF00, 0x000000FF);
+    if (!surface) {
+        printf("Surface could not be created! SDL Error: %s\n", SDL_GetError());
+        return NULL;
+    }
+    
+    // Lock the surface for direct access to the pixels
+    SDL_LockSurface(surface);
+    
+    // Get pointer to pixel data
+    Uint32* pixels = (Uint32*)surface->pixels;
+    
+    // Fill with solid color
+    for (int i = 0; i < TEXTURE_SIZE * TEXTURE_SIZE; i++) {
+        pixels[i] = color;
+    }
+    
+    // Unlock surface
+    SDL_UnlockSurface(surface);
+    
+    return surface;
+}
 
 int main(int argc, char* argv[]) {
     // Initialize SDL
@@ -46,8 +139,19 @@ int main(int argc, char* argv[]) {
     );
     lighting.addDirectionalLight(sunlight);
     
-    // Create a cube mesh
-    Mesh cube = Mesh::createCube(1.0f, Colors::BLUE);
+    // Create a cube mesh with texture coordinates
+    Mesh texCube = Mesh::createTexturedCube(1.0f, Colors::WHITE);
+    
+    // Create texture at runtime
+    SDL_Surface* cubeTexture = createCrateTexture();
+    if (!cubeTexture) {
+        printf("Failed to create texture. Falling back to color texture.\n");
+        cubeTexture = createColorTexture(Colors::BLUE);
+        
+        if (!cubeTexture) {
+            printf("Could not create any texture. Using default colored cube.\n");
+        }
+    }
     
     // Load a Quake 2 model (you'll need to provide your own MD2 file)
     Q2Mesh q2Model;
@@ -70,16 +174,21 @@ int main(int argc, char* argv[]) {
     // Print instructions
     printf("Controls:\n");
     printf("  ESC: Quit\n");
-    printf("  SPACE: Toggle rendering mode\n");
+    printf("  SPACE: Toggle rendering mode (Wireframe, Solid, Combined, Textured)\n");
     printf("  B: Toggle backface culling\n");
     printf("  1: Stand animation\n");
     printf("  2: Run animation\n");
     printf("  3: Attack animation\n");
     printf("  4: Pain animation\n");
     printf("  5: Death animation\n");
+    printf("  T: Show textured cube\n");
+    printf("  M: Show model\n");
     
     // Display initial backface culling state
     printf("Backface Culling: %s\n", pipeline.enableBackfaceCulling ? "ON" : "OFF");
+    
+    // Flag to switch between model and cube
+    bool showModel = true;
     
     // Main game loop
     while (running) {
@@ -98,9 +207,9 @@ int main(int argc, char* argv[]) {
                     case SDLK_SPACE:
                     {
                         // Toggle rendering mode
-                        renderMode = (RenderMode)(((int)renderMode + 1) % 3);
+                        renderMode = (RenderMode)(((int)renderMode + 1) % 4); // Now includes textured mode
                         // Display current rendering mode
-                        const char* modeNames[] = { "Wireframe Only", "Solid Only", "Combined" };
+                        const char* modeNames[] = { "Wireframe Only", "Solid Only", "Combined", "Textured" };
                         printf("Render Mode: %s\n", modeNames[renderMode]);
                         break;
                     }
@@ -125,6 +234,14 @@ int main(int argc, char* argv[]) {
                     case SDLK_5:
                         if (modelLoaded) q2Model.setAnimation("death1");
                         break;
+                    case SDLK_t:
+                        showModel = false;
+                        printf("Showing textured cube\n");
+                        break;
+                    case SDLK_m:
+                        showModel = true;
+                        printf("Showing model\n");
+                        break;
                 }
             }
         }
@@ -135,47 +252,45 @@ int main(int argc, char* argv[]) {
         // Update rotation angle
         rotationAngle += 0.02f; // Rotation speed
         
-        // HIDE CUBE - Comment out these lines
-        /*
-        // Create world matrix with rotation
-        Matrix4x4 worldMatrix = Matrix4x4::rotationY(rotationAngle) * 
-                               Matrix4x4::rotationX(rotationAngle * 0.5f) * 
-                               Matrix4x4::translation(0.0f, 0.0f, 0.0f);
-        
-        // Process the cube through the pipeline
-        pipeline.processMesh(cube, worldMatrix);
-        
-        // Render based on current mode
-        switch (renderMode) {
-            case WIREFRAME_ONLY:
-                pipeline.drawWireframe(Colors::WHITE);
-                break;
-            case SOLID_ONLY:
-                pipeline.drawSolidFlat(lighting);
-                break;
-            case COMBINED:
-                pipeline.drawSolidFlat(lighting);
-                pipeline.drawWireframe(Colors::WHITE);
-                break;
+        if (!showModel && cubeTexture) {
+            // Create world matrix with rotation for the textured cube
+            Matrix4x4 texCubeWorldMatrix = Matrix4x4::rotationY(rotationAngle) * 
+                                         Matrix4x4::rotationX(rotationAngle * 0.5f) * 
+                                         Matrix4x4::translation(0.0f, 0.0f, 0.0f);
+            
+            // Process the textured cube through the pipeline
+            pipeline.processMesh(texCube, texCubeWorldMatrix);
+            
+            // Render based on current mode
+            switch (renderMode) {
+                case WIREFRAME_ONLY:
+                    pipeline.drawWireframe(Colors::WHITE);
+                    break;
+                case SOLID_ONLY:
+                    pipeline.drawSolidFlat(lighting);
+                    break;
+                case COMBINED:
+                    pipeline.drawSolidFlat(lighting);
+                    pipeline.drawWireframe(Colors::WHITE);
+                    break;
+                case TEXTURED:
+                    pipeline.drawTextured(cubeTexture);
+                    break;
+            }
         }
-        */
-        
-        // Update animation based on elapsed time - multiply by animation speed factor
-        float deltaTime = frameTimer.elapsedMilliseconds() / 1000.0f;
-        float animationSpeedFactor = 3.0f; // Speed up animations
-        if (modelLoaded) {
+        else if (modelLoaded) {
+            // Update animation based on elapsed time - multiply by animation speed factor
+            float deltaTime = frameTimer.elapsedMilliseconds() / 1000.0f;
+            float animationSpeedFactor = 3.0f; // Speed up animations
             q2Model.updateAnimation(deltaTime * animationSpeedFactor);
-        }
-        
-        // FIX MODEL ORIENTATION - Apply rotation to fix the model orientation only, no continuous rotation
-        // Update the model orientation to face the camera
-        Matrix4x4 q2WorldMatrix = Matrix4x4::rotationY(3*M_PI/2) *    // 270° rotation (90° + 180° to turn it around)
-                                  Matrix4x4::rotationX(-M_PI/2) *     // Fix up/down orientation
-                                  Matrix4x4::scaling(0.05f, 0.05f, 0.05f) *  
-                                  Matrix4x4::translation(0.0f, -0.5f, 0.0f);  // Adjusted Y position
-        
-        // Get current animated mesh
-        if (modelLoaded) {
+            
+            // Update the model orientation to face the camera
+            Matrix4x4 q2WorldMatrix = Matrix4x4::rotationY(3*M_PI/2) *    // 270° rotation (90° + 180° to turn it around)
+                                    Matrix4x4::rotationX(-M_PI/2) *     // Fix up/down orientation
+                                    Matrix4x4::scaling(0.05f, 0.05f, 0.05f) *  
+                                    Matrix4x4::translation(0.0f, -0.5f, 0.0f);  // Adjusted Y position
+            
+            // Get current animated mesh
             Mesh currentMesh = q2Model.getCurrentMesh();
             
             // Process the animated mesh through the pipeline
@@ -193,21 +308,40 @@ int main(int argc, char* argv[]) {
                     pipeline.drawSolidFlat(lighting);
                     pipeline.drawWireframe(Colors::WHITE);
                     break;
+                case TEXTURED:
+                    // Fallback to solid rendering since model doesn't have texture coordinates
+                    pipeline.drawSolidFlat(lighting);
+                    break;
             }
         }
         
         // Render to screen
         renderBuffer();
         
-        // Cap the frame rate (optional)
+        // Frame rate control and calculation
         frameTimer.stop();
-        double frameTime = frameTimer.elapsedMilliseconds();
-        if (frameTime < 16.667) { // Target ~60 FPS
-            SDL_Delay((Uint32)(16.667 - frameTime));
+        float fps = 1000.0f / frameTimer.elapsedMilliseconds();
+        
+        // Print FPS every 60 frames
+        static int frameCount = 0;
+        if (++frameCount >= 60) {
+            printf("FPS: %.2f\n", fps);
+            frameCount = 0;
+        }
+        
+        // Limit to approximately 60 FPS
+        if (frameTimer.elapsedMilliseconds() < 16) {
+            SDL_Delay(16 - (Uint32)frameTimer.elapsedMilliseconds());
         }
     }
     
-    // Clean up
+    // Clean up textures
+    if (cubeTexture) {
+        SDL_FreeSurface(cubeTexture);
+    }
+    
+    // Cleanup SDL resources
     cleanup();
+    
     return 0;
 }
